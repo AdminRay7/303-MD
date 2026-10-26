@@ -3,13 +3,26 @@ require("dotenv").config();
 // ============================================
 //   Silence Baileys' known log spam
 // ============================================
-const _origErr  = console.error.bind(console);
-const _origWarn = console.warn.bind(console);
-const _origLog  = console.log.bind(console);
-const _SILENCED = ['Bad MAC', 'Bad RSA', 'decrypt', 'Closing session', 'Removing old closed', 'unpadRandom'];
-const _silence = (args) => typeof args[0] === 'string' && _SILENCED.some(p => args[0].includes(p));
-console.error = (...a) => { if (!_silence(a)) _origErr(...a); };
-console.warn  = (...a) => { if (!_silence(a)) _origWarn(...a); };
+const _origConsoleError = console.error.bind(console);
+const _origConsoleWarn  = console.warn.bind(console);
+
+const _SILENCED_PATTERNS = [
+    'Bad MAC', 'Bad RSA', 'doDecryptWhisperMessage', 'decryptWithSessions',
+    'verifyMAC', 'Session error:Error: Bad MAC',
+    'Failed to decrypt message with any known session',
+    'unpadRandomMax16', 'Closing session',
+    'Closing open session in favor of incoming preKey bundle',
+    'Session already closed', 'Removing old closed session'
+];
+
+function _shouldSilence(args) {
+    const first = args[0];
+    if (typeof first !== 'string') return false;
+    return _SILENCED_PATTERNS.some(p => first.includes(p));
+}
+
+console.error = (...args) => { if (!_shouldSilence(args)) _origConsoleError(...args); };
+console.warn  = (...args) => { if (!_shouldSilence(args)) _origConsoleWarn(...args); };
 
 const {
     default: makeWASocket,
@@ -125,7 +138,9 @@ async function _bootSocketImpl(sessionId, session) {
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000
+        keepAliveIntervalMs: 30000,
+        generateHighQualityLinkPreview: false, 
+        emitOwnEvents: false
     });
 
     session.conn = conn;
@@ -150,13 +165,11 @@ async function _bootSocketImpl(sessionId, session) {
                 await collection.updateOne({ _id: `${sessionId}:meta` }, { $set: { value: { jid: conn.user?.id, linkedAt: Date.now() } } }, { upsert: true });
             } catch {}
 
-            // Send Welcome Message
             if (!session.welcomed && config.ownerNumber) {
                 session.welcomed = true;
                 try {
                     const cleanOwner = String(config.ownerNumber).replace(/\D/g, "");
                     const ownerJid = cleanOwner + "@s.whatsapp.net";
-                    
                     await conn.sendMessage(ownerJid, {
                         text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ New session linked!\nSession: ${sessionId}\nOwner: ${config.ownerName}\n\n${fancy(config.footer)}`
                     });
@@ -196,9 +209,16 @@ async function _bootSocketImpl(sessionId, session) {
     });
 
     const presenter = require("./presenter");
+
+    // BULLETPROOF MESSAGE LISTENER
     conn.ev.on("messages.upsert", async (m) => {
-        try { await presenter(conn, m, sessionId); } catch (e) {}
+        try {
+            await presenter(conn, m, sessionId);
+        } catch (err) {
+            // Errors caught here to prevent socket crash
+        }
     });
+
     conn.ev.on("group-participants.update", async (u) => {
         try { await presenter.handleGroupUpdate(conn, u); } catch (e) {}
     });
@@ -366,6 +386,5 @@ app.post("/api/unpair", async (req, res) => {
     app.listen(PORT, () => {
         console.log(fancy(`🌐 Dashboard: http://localhost:${PORT}`));
     });
-    // RESTORE SESSIONS ON STARTUP
     resumeAllSessions().catch(e => console.error("resumeAllSessions:", e.message));
 })();
