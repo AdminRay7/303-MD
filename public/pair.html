@@ -3,110 +3,322 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>WhatsApp Pairing</title>
+    <title>WhatsApp Pairing Panel</title>
     <style>
-        * { box-sizing: border-box; }
+        :root {
+            --primary: #25D366;
+            --primary-hover: #1eb855;
+            --bg-color: #0f172a;
+            --glass-bg: rgba(255, 255, 255, 0.05);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --text-main: #ffffff;
+            --text-sub: #94a3b8;
+            --err: #ef4444;
+            --ok: #10b981;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
         body {
-            font-family: -apple-system, system-ui, sans-serif;
-            max-width: 460px; margin: 40px auto; padding: 20px;
-            background: #f5f5f5; color: #222;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
         }
-        h1 { font-size: 22px; margin: 0 0 4px; }
-        .sub { color: #666; font-size: 13px; margin-bottom: 24px; }
-        label { display: block; font-size: 13px; font-weight: 600; margin: 16px 0 6px; }
-        input {
-            width: 100%; padding: 12px 14px; font-size: 16px;
-            border: 1px solid #ccc; border-radius: 8px; background: #fff;
+
+        /* ---- Disco Lights Background ---- */
+        .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(80px);
+            z-index: 0;
+            opacity: 0.6;
+            animation: float 12s infinite ease-in-out alternate;
         }
-        input:focus { outline: none; border-color: #25D366; }
+
+        .orb-1 {
+            width: 300px;
+            height: 300px;
+            background: #25D366;
+            top: -10%;
+            left: -10%;
+            animation-delay: 0s;
+        }
+
+        .orb-2 {
+            width: 400px;
+            height: 400px;
+            background: #3b82f6;
+            bottom: -20%;
+            right: -10%;
+            animation-delay: -4s;
+        }
+
+        .orb-3 {
+            width: 250px;
+            height: 250px;
+            background: #a855f7;
+            top: 40%;
+            left: 60%;
+            animation-delay: -8s;
+        }
+
+        @keyframes float {
+            0% { transform: translate(0, 0) scale(1); }
+            50% { transform: translate(40px, -60px) scale(1.1); }
+            100% { transform: translate(-30px, 30px) scale(0.9); }
+        }
+
+        /* ---- Glassmorphism Panel ---- */
+        .panel {
+            position: relative;
+            z-index: 1;
+            width: 100%;
+            max-width: 420px;
+            margin: 20px;
+            padding: 40px 32px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 24px;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4);
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+        }
+
+        p.sub {
+            color: var(--text-sub);
+            font-size: 14px;
+            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+
+        .input-group {
+            text-align: left;
+            margin-bottom: 20px;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-sub);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .input-group input {
+            width: 100%;
+            padding: 16px;
+            font-size: 16px;
+            color: var(--text-main);
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+
+        .input-group input:focus {
+            border-color: var(--primary);
+            background: rgba(0, 0, 0, 0.4);
+            box-shadow: 0 0 0 3px rgba(37, 211, 102, 0.2);
+        }
+
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.3);
+        }
+
         button {
-            width: 100%; padding: 14px; margin-top: 20px;
-            font-size: 16px; font-weight: 600;
-            background: #25D366; color: #fff;
-            border: none; border-radius: 8px; cursor: pointer;
+            width: 100%;
+            padding: 16px;
+            margin-top: 10px;
+            font-size: 16px;
+            font-weight: 700;
+            color: #000;
+            background: var(--primary);
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 15px rgba(37, 211, 102, 0.3);
         }
-        button:disabled { background: #aaa; cursor: not-allowed; }
-        .code {
-            font-size: 30px; letter-spacing: 6px; font-weight: 700;
-            text-align: center; padding: 24px;
-            background: #fff; border-radius: 10px;
-            margin: 24px 0 8px; font-family: ui-monospace, monospace;
-            border: 2px dashed #25D366;
+
+        button:hover:not(:disabled) {
+            background: var(--primary-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(37, 211, 102, 0.4);
         }
-        .hint { font-size: 12px; color: #666; text-align: center; }
-        .err { padding: 12px; background: #fee; color: #c00; border-radius: 8px; font-size: 14px; margin-top: 16px; }
-        .ok  { padding: 12px; background: #efe; color: #070; border-radius: 8px; font-size: 14px; margin-top: 16px; }
-        .status { font-size: 13px; color: #555; margin-top: 16px; text-align: center; min-height: 20px; }
+
+        button:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background: #555;
+            color: #999;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        /* ---- Output Areas ---- */
+        #out {
+            margin-top: 20px;
+        }
+
+        .code-display {
+            font-size: 32px;
+            letter-spacing: 8px;
+            font-weight: 700;
+            text-align: center;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.5);
+            border: 2px dashed var(--primary);
+            border-radius: 12px;
+            margin: 20px 0;
+            font-family: ui-monospace, monospace;
+            color: var(--primary);
+            text-shadow: 0 0 20px rgba(37, 211, 102, 0.5);
+        }
+
+        .msg {
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-top: 15px;
+            line-height: 1.4;
+        }
+
+        .msg.err { background: rgba(239, 68, 68, 0.15); color: var(--err); border: 1px solid rgba(239, 68, 68, 0.3); }
+        .msg.ok  { background: rgba(16, 185, 129, 0.15); color: var(--ok); border: 1px solid rgba(16, 185, 129, 0.3); }
+        
+        .status-text {
+            font-size: 13px;
+            color: var(--text-sub);
+            margin-top: 15px;
+            min-height: 20px;
+        }
+
+        .hint {
+            font-size: 12px;
+            color: var(--text-sub);
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid var(--glass-border);
+            line-height: 1.6;
+        }
     </style>
 </head>
 <body>
-    <h1>WhatsApp Pairing</h1>
-    <div class="sub">Link a device using a phone number instead of QR.</div>
 
-    <label for="session">Session name</label>
-    <input id="session" placeholder="e.g. my-phone" autocomplete="off">
+    <!-- Disco Lights Background Elements -->
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
 
-    <label for="phone">Phone number (country code, digits only)</label>
-    <input id="phone" placeholder="e.g. 254712345678" inputmode="numeric" autocomplete="off">
+    <!-- Main Glass Panel -->
+    <div class="panel">
+        <h1>WhatsApp Linker</h1>
+        <p class="sub">Enter your number to generate a secure pairing code.</p>
 
-    <button id="btn">Get Pairing Code</button>
+        <div class="input-group">
+            <label for="phone">Phone Number</label>
+            <input id="phone" placeholder="e.g. 254712345678" inputmode="numeric" autocomplete="off">
+        </div>
 
-    <div id="out"></div>
-    <div class="status" id="status"></div>
+        <button id="btn">Get Pairing Code</button>
 
-    <div class="hint" style="margin-top:24px">
-        After getting the code:<br>
-        WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number
+        <div id="out"></div>
+        <div class="status-text" id="status"></div>
+
+        <div class="hint">
+            After getting the code:<br>
+            <strong>WhatsApp → Linked Devices → Link with phone number</strong>
+        </div>
     </div>
 
     <script>
         const $ = id => document.getElementById(id);
-        const out = $("out"), status = $("status");
+        const out = $("out"), status = $("status"), btn = $("btn"), phoneInput = $("phone");
         let pollTimer = null;
 
-        $("session").value = "session-" + Math.random().toString(36).slice(2, 8);
+        // Generate a random session ID in the background
+        const sessionId = "sess-" + Math.random().toString(36).slice(2, 10);
 
         function setStatus(msg, color) {
             status.textContent = msg || "";
-            status.style.color = color || "#555";
+            status.style.color = color || "var(--text-sub)";
         }
-        function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
-        function startPoll(sessionId) {
+        function stopPoll() { 
+            if (pollTimer) { 
+                clearInterval(pollTimer); 
+                pollTimer = null; 
+            } 
+        }
+
+        function startPoll() {
             stopPoll();
             pollTimer = setInterval(async () => {
                 try {
                     const r = await fetch("/api/pair/status?sessionId=" + encodeURIComponent(sessionId));
                     const j = await r.json();
+                    
                     if (j.connected) {
                         stopPoll();
-                        out.innerHTML = `<div class="ok">✅ Connected!<br><code>${j.jid || ""}</code></div>`;
-                        setStatus("Paired successfully.", "#070");
-                        $("btn").disabled = false;
+                        out.innerHTML = `<div class="msg ok">✅ Device Linked Successfully!<br><small>${j.jid || ""}</small></div>`;
+                        setStatus("Paired successfully.", "var(--ok)");
+                        btn.disabled = false;
+                        btn.textContent = "Link Another Device";
+                        phoneInput.value = "";
                     } else if (j.exists) {
-                        setStatus("Waiting for you to enter the code on WhatsApp…", "#666");
+                        setStatus("Waiting for you to enter the code on WhatsApp…", "var(--primary)");
                     } else {
-                        setStatus("Session not found.", "#c00");
                         stopPoll();
+                        setStatus("Session dropped or logged out.", "var(--err)");
+                        out.innerHTML = `<div class="msg err">Session closed. Please click the button to try again.</div>`;
+                        btn.disabled = false;
+                        btn.textContent = "Get Pairing Code";
                     }
-                } catch {}
+                } catch {
+                    stopPoll();
+                    setStatus("Connection to server lost.", "var(--err)");
+                    btn.disabled = false;
+                }
             }, 3000);
         }
 
-        $("btn").onclick = async () => {
-            const sessionId = $("session").value.trim();
-            const num = $("phone").value.replace(/\D/g, "");
+        btn.onclick = async () => {
+            const num = phoneInput.value.replace(/\D/g, "");
             out.innerHTML = "";
             stopPoll();
 
-            if (!sessionId) return out.innerHTML = '<div class="err">Enter a session name.</div>';
-            if (!/^[a-zA-Z0-9_-]{3,40}$/.test(sessionId))
-                return out.innerHTML = '<div class="err">Session name: 3-40 chars, alphanumeric/_/-.</div>';
-            if (num.length < 10 || num.length > 15)
-                return out.innerHTML = '<div class="err">Phone must be 10-15 digits with country code.</div>';
+            if (num.length < 10 || num.length > 15) {
+                out.innerHTML = '<div class="msg err">Phone number must be 10-15 digits (include country code, no + sign).</div>';
+                return;
+            }
 
-            $("btn").disabled = true;
-            setStatus("Requesting pairing code…");
+            btn.disabled = true;
+            btn.textContent = "Requesting...";
+            setStatus("Generating secure code…");
 
             try {
                 const r = await fetch("/api/pair", {
@@ -115,19 +327,32 @@
                     body: JSON.stringify({ sessionId, num })
                 });
                 const j = await r.json();
-                if (!r.ok) throw new Error(j.error || "Failed");
-                out.innerHTML = `<div class="code">${j.code}</div>`;
-                setStatus("Enter this code in WhatsApp → Linked Devices.");
-                startPoll(sessionId);
+                
+                if (!r.ok) throw new Error(j.error || "Failed to generate code");
+                
+                out.innerHTML = `<div class="code-display">${j.code}</div>`;
+                setStatus("Enter this code in WhatsApp → Linked Devices.", "var(--primary)");
+                btn.textContent = "Waiting for link...";
+                
+                startPoll();
             } catch (e) {
-                out.innerHTML = `<div class="err">${e.message}</div>`;
+                out.innerHTML = `<div class="msg err">${e.message}</div>`;
                 setStatus("");
-                $("btn").disabled = false;
+                btn.disabled = false;
+                btn.textContent = "Get Pairing Code";
             }
         };
 
-        ["session", "phone"].forEach(id => {
-            $(id).addEventListener("input", () => { $("btn").disabled = false; });
+        phoneInput.addEventListener("input", () => {
+            if (!pollTimer) {
+                btn.disabled = false;
+                btn.textContent = "Get Pairing Code";
+            }
+        });
+        
+        // Allow pressing Enter to submit
+        phoneInput.addEventListener("keypress", (e) => {
+            if (e.key === "Enter" && !btn.disabled) btn.click();
         });
     </script>
 </body>
