@@ -34,12 +34,7 @@ const PORT = config.port;
 // Middleware
 app.use(require("helmet")({ contentSecurityPolicy: false }));
 app.use(require("compression")());
-// FIXED: Increased rate limit and skip successful requests so it doesn't block legitimate polling
-app.use("/api/pair", require("express-rate-limit")({ 
-    windowMs: 60_000, 
-    max: 15, 
-    skipSuccessfulRequests: true 
-}));
+app.use("/api/pair", require("express-rate-limit")({ windowMs: 60_000, max: 15, skipSuccessfulRequests: true }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -57,10 +52,10 @@ global.__waVersionCache = null;
 global.__bootLocks = new Map();
 global.__pairCooldown = new Map();
 
-const MAX_SESSIONS = 12;
-const PAIR_COOLDOWN_MS = 15_000; // FIXED: Reduced from 30s to 15s
+const MAX_SESSIONS = 15;
+const PAIR_COOLDOWN_MS = 15_000;
 const PAIR_CODE_TIMEOUT_MS = 20_000;
-const SOCKET_READY_TIMEOUT_MS = 45_000; // FIXED: Increased to 45s for Heroku wakeup
+const SOCKET_READY_TIMEOUT_MS = 45_000;
 
 // Helpers
 function servePage(res, filename) {
@@ -130,7 +125,7 @@ async function _bootSocketImpl(sessionId, session) {
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000 // FIXED: Keepalive to prevent Heroku sleep drops
+        keepAliveIntervalMs: 30000
     });
 
     session.conn = conn;
@@ -148,32 +143,53 @@ async function _bootSocketImpl(sessionId, session) {
         if (connection === "open") {
             session.socketReady = true;
             session.pairing = null;
+            session.pairingNumber = null;
             console.log(fancy(`✅ [${sessionId}] connected successfully`));
 
             try {
                 await collection.updateOne({ _id: `${sessionId}:meta` }, { $set: { value: { jid: conn.user?.id, linkedAt: Date.now() } } }, { upsert: true });
             } catch {}
+
+            // Send Welcome Message if not sent yet
+            if (!session.welcomed && config.ownerNumber) {
+                session.welcomed = true;
+                try {
+                    const ownerJid = config.ownerNumber.replace(/\D/g, "") + "@s.whatsapp.net";
+                    await conn.sendMessage(ownerJid, {
+                        text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ New session linked!\nSession: ${sessionId}\nOwner: ${config.ownerName}\n\n${fancy(config.footer)}`
+                    });
+                } catch (e) { console.error("Welcome msg failed:", e.message); }
+            }
         }
 
         if (connection === "close") {
             session.socketReady = false;
             session.pairingReady = false;
             const code = lastDisconnect?.error?.output?.statusCode;
+            const errorMsg = lastDisconnect?.error?.message || "";
             console.log(fancy(`❌ [${sessionId}] closed (${code})`));
 
             if (code === 401 || code === DisconnectReason.loggedOut) {
-                // FIXED: Fully clean up the session and remove from memory so user can re-pair immediately
                 await logoutSession(sessionId);
                 return;
             }
-            if (session._paused) return;
-            if (code === 440) { global.sessions.delete(sessionId); return; }
+            
+            if (session._paused || code === 440) {
+                global.sessions.delete(sessionId);
+                return;
+            }
 
             global.__bootLocks.delete(sessionId);
+            
+            // FIXED: 515 (Restart Required) and 428 (Connection Closed) should reconnect instantly
+            const isRestart = code === 515 || code === 428 || errorMsg.includes("Stream Errored");
+            const delay = isRestart ? 1000 : 10000; // 1 second if pairing just finished, otherwise 10s
+
             setTimeout(() => {
                 if (!global.sessions.has(sessionId) || session._paused) return;
+                console.log(fancy(`🔄 Reconnecting [${sessionId}]...`));
                 bootSocket(sessionId, session).catch(() => {});
-            }, 10000); // FIXED: Increased to 10s to avoid rapid Heroku restart loops
+            }, delay);
         }
     });
 
@@ -186,22 +202,6 @@ async function _bootSocketImpl(sessionId, session) {
     });
     conn.ev.on("call", async (calls) => {
         try { await presenter.handleCallEvent(conn, calls); } catch (e) {}
-    });
-
-    conn.ev.on("messages.upsert", async (m) => {
-        try {
-            if (m.type !== "notify" || !Array.isArray(m.messages)) return;
-            for (const msg of m.messages) {
-                if (msg.key?.remoteJid !== "status@broadcast" || msg.key?.fromMe) continue;
-                if (config.autoStatus.view) { try { await conn.readMessages([msg.key]); } catch {} }
-                if (config.autoStatus.like) {
-                    try {
-                        const emoji = config.channelEmojis[Math.floor(Math.random() * config.channelEmojis.length)];
-                        await conn.sendMessage("status@broadcast", { react: { text: emoji, key: msg.key } }, { statusJidList: [msg.key.participant || msg.key.remoteJid] });
-                    } catch {}
-                }
-            }
-        } catch (e) {}
     });
 
     return conn;
@@ -270,8 +270,36 @@ async function logoutSession(sessionId) {
         const c = global.mongoClient.db("xmd303").collection("authState");
         const safe = escapeRegex(sessionId);
         await c.deleteMany({ _id: { $regex: `^${safe}:` } });
-        console.log(fancy(`🧹 [${sessionId}] credentials purged from DB`));
     } catch (e) { console.error(`logout ${sessionId}:`, e.message); }
+}
+
+// RESTORE SESSIONS ON BOOT
+async function resumeAllSessions() {
+    if (!config.mongodb) return;
+    try {
+        await initMongo();
+        const c = global.mongoClient.db("xmd303").collection("authState");
+        const metas = await c.find({ _id: { $regex: ":meta$" } }).toArray();
+        console.log(fancy(`🔄 Restoring ${metas.length} session(s)...`));
+
+        const ids = metas.map(m => String(m._id).replace(/:meta$/, "")).filter(id => !global.sessions.has(id));
+
+        for (const sessionId of ids) {
+            if (global.sessions.size >= MAX_SESSIONS) break;
+            const session = { conn: null, socketReady: false, pairing: null, pairingNumber: null, startedAt: Date.now(), welcomed: true, pairingReady: false, socketFailed: false };
+            global.sessions.set(sessionId, session);
+            try {
+                await Promise.race([
+                    bootSocket(sessionId, session),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("boot timeout")), 75_000))
+                ]);
+            } catch (e) {
+                console.error(`Restore ${sessionId}:`, e.message);
+                global.sessions.delete(sessionId);
+            }
+            await new Promise(r => setTimeout(r, 1500));
+        }
+    } catch (e) { console.error("Restore error:", e.message); }
 }
 
 // Routes
@@ -336,4 +364,6 @@ app.post("/api/unpair", async (req, res) => {
     app.listen(PORT, () => {
         console.log(fancy(`🌐 Dashboard: http://localhost:${PORT}`));
     });
+    // RESTORE SESSIONS ON STARTUP
+    resumeAllSessions().catch(e => console.error("resumeAllSessions:", e.message));
 })();
