@@ -150,14 +150,17 @@ async function _bootSocketImpl(sessionId, session) {
                 await collection.updateOne({ _id: `${sessionId}:meta` }, { $set: { value: { jid: conn.user?.id, linkedAt: Date.now() } } }, { upsert: true });
             } catch {}
 
-            // Send Welcome Message if not sent yet
+            // Send Welcome Message
             if (!session.welcomed && config.ownerNumber) {
                 session.welcomed = true;
                 try {
-                    const ownerJid = config.ownerNumber.replace(/\D/g, "") + "@s.whatsapp.net";
+                    const cleanOwner = String(config.ownerNumber).replace(/\D/g, "");
+                    const ownerJid = cleanOwner + "@s.whatsapp.net";
+                    
                     await conn.sendMessage(ownerJid, {
                         text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ New session linked!\nSession: ${sessionId}\nOwner: ${config.ownerName}\n\n${fancy(config.footer)}`
                     });
+                    console.log(fancy(`📩 Welcome message sent to ${cleanOwner}`));
                 } catch (e) { console.error("Welcome msg failed:", e.message); }
             }
         }
@@ -181,9 +184,8 @@ async function _bootSocketImpl(sessionId, session) {
 
             global.__bootLocks.delete(sessionId);
             
-            // FIXED: 515 (Restart Required) and 428 (Connection Closed) should reconnect instantly
             const isRestart = code === 515 || code === 428 || errorMsg.includes("Stream Errored");
-            const delay = isRestart ? 1000 : 10000; // 1 second if pairing just finished, otherwise 10s
+            const delay = isRestart ? 1000 : 10000;
 
             setTimeout(() => {
                 if (!global.sessions.has(sessionId) || session._paused) return;
