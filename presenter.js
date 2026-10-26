@@ -290,4 +290,41 @@ module.exports = async function presenter(conn, m, sessionId) {
 
 // ============================================
 //   Group update / call fan-out
-//
+// ============================================
+module.exports.handleGroupUpdate = async function (conn, update) {
+    try {
+        if (!update?.id || !Array.isArray(update.participants)) return;
+        for (const [name, mod] of autoCache) {
+            if (typeof mod.onGroupUpdate !== "function") continue;
+            try { await mod.onGroupUpdate(conn, update); }
+            catch (e) { console.error(`[auto:${name}:group]`, e.message); }
+        }
+    } catch (e) {
+        console.error("presenter.handleGroupUpdate:", e.message);
+    }
+};
+
+module.exports.handleCallEvent = async function (conn, calls) {
+    try {
+        if (!Array.isArray(calls)) return;
+        for (const call of calls) {
+            if (config.anticall && call.status === "offer") {
+                try { await conn.rejectCall(call.id, call.from); } catch {}
+            }
+            for (const [name, mod] of autoCache) {
+                if (typeof mod.onCall !== "function") continue;
+                try { await mod.onCall(conn, call); }
+                catch (e) { console.error(`[auto:${name}:call]`, e.message); }
+            }
+        }
+    } catch (e) {
+        console.error("presenter.handleCallEvent:", e.message);
+    }
+};
+
+// ============================================
+//   Public API
+// ============================================
+module.exports.getCommandCache = () => commandCache;
+module.exports.getAutoCache    = () => autoCache;
+module.exports.reload          = loadCommands;
