@@ -1,0 +1,22 @@
+{
+  "name": "303-xmd",
+  "version": "2.0.0",
+  "description": "303-XMD — The Last Key (pairing + commands)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": { "node": ">=20.0.0" },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "compression": "^1.7.4",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "mongodb": "^6.10.0",
+    "mongoose": "^8.8.0",
+    "pino": "^9.5.0"
+  }
+}
