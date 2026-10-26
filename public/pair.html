@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WhatsApp Pairing</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, system-ui, sans-serif;
+            max-width: 460px; margin: 40px auto; padding: 20px;
+            background: #f5f5f5; color: #222;
+        }
+        h1 { font-size: 22px; margin: 0 0 4px; }
+        .sub { color: #666; font-size: 13px; margin-bottom: 24px; }
+        label { display: block; font-size: 13px; font-weight: 600; margin: 16px 0 6px; }
+        input {
+            width: 100%; padding: 12px 14px; font-size: 16px;
+            border: 1px solid #ccc; border-radius: 8px; background: #fff;
+        }
+        input:focus { outline: none; border-color: #25D366; }
+        button {
+            width: 100%; padding: 14px; margin-top: 20px;
+            font-size: 16px; font-weight: 600;
+            background: #25D366; color: #fff;
+            border: none; border-radius: 8px; cursor: pointer;
+        }
+        button:disabled { background: #aaa; cursor: not-allowed; }
+        .code {
+            font-size: 30px; letter-spacing: 6px; font-weight: 700;
+            text-align: center; padding: 24px;
+            background: #fff; border-radius: 10px;
+            margin: 24px 0 8px; font-family: ui-monospace, monospace;
+            border: 2px dashed #25D366;
+        }
+        .hint { font-size: 12px; color: #666; text-align: center; }
+        .err { padding: 12px; background: #fee; color: #c00; border-radius: 8px; font-size: 14px; margin-top: 16px; }
+        .ok  { padding: 12px; background: #efe; color: #070; border-radius: 8px; font-size: 14px; margin-top: 16px; }
+        .status { font-size: 13px; color: #555; margin-top: 16px; text-align: center; min-height: 20px; }
+    </style>
+</head>
+<body>
+    <h1>WhatsApp Pairing</h1>
+    <div class="sub">Link a device using a phone number instead of QR.</div>
+
+    <label for="session">Session name</label>
+    <input id="session" placeholder="e.g. my-phone" autocomplete="off">
+
+    <label for="phone">Phone number (country code, digits only)</label>
+    <input id="phone" placeholder="e.g. 254712345678" inputmode="numeric" autocomplete="off">
+
+    <button id="btn">Get Pairing Code</button>
+
+    <div id="out"></div>
+    <div class="status" id="status"></div>
+
+    <div class="hint" style="margin-top:24px">
+        After getting the code:<br>
+        WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number
+    </div>
+
+    <script>
+        const $ = id => document.getElementById(id);
+        const out = $("out"), status = $("status");
+        let pollTimer = null;
+
+        $("session").value = "session-" + Math.random().toString(36).slice(2, 8);
+
+        function setStatus(msg, color) {
+            status.textContent = msg || "";
+            status.style.color = color || "#555";
+        }
+        function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+        function startPoll(sessionId) {
+            stopPoll();
+            pollTimer = setInterval(async () => {
+                try {
+                    const r = await fetch("/api/pair/status?sessionId=" + encodeURIComponent(sessionId));
+                    const j = await r.json();
+                    if (j.connected) {
+                        stopPoll();
+                        out.innerHTML = `<div class="ok">✅ Connected!<br><code>${j.jid || ""}</code></div>`;
+                        setStatus("Paired successfully.", "#070");
+                        $("btn").disabled = false;
+                    } else if (j.exists) {
+                        setStatus("Waiting for you to enter the code on WhatsApp…", "#666");
+                    } else {
+                        setStatus("Session not found.", "#c00");
+                        stopPoll();
+                    }
+                } catch {}
+            }, 3000);
+        }
+
+        $("btn").onclick = async () => {
+            const sessionId = $("session").value.trim();
+            const num = $("phone").value.replace(/\D/g, "");
+            out.innerHTML = "";
+            stopPoll();
+
+            if (!sessionId) return out.innerHTML = '<div class="err">Enter a session name.</div>';
+            if (!/^[a-zA-Z0-9_-]{3,40}$/.test(sessionId))
+                return out.innerHTML = '<div class="err">Session name: 3-40 chars, alphanumeric/_/-.</div>';
+            if (num.length < 10 || num.length > 15)
+                return out.innerHTML = '<div class="err">Phone must be 10-15 digits with country code.</div>';
+
+            $("btn").disabled = true;
+            setStatus("Requesting pairing code…");
+
+            try {
+                const r = await fetch("/api/pair", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ sessionId, num })
+                });
+                const j = await r.json();
+                if (!r.ok) throw new Error(j.error || "Failed");
+                out.innerHTML = `<div class="code">${j.code}</div>`;
+                setStatus("Enter this code in WhatsApp → Linked Devices.");
+                startPoll(sessionId);
+            } catch (e) {
+                out.innerHTML = `<div class="err">${e.message}</div>`;
+                setStatus("");
+                $("btn").disabled = false;
+            }
+        };
+
+        ["session", "phone"].forEach(id => {
+            $(id).addEventListener("input", () => { $("btn").disabled = false; });
+        });
+    </script>
+</body>
+</html>
