@@ -1,10 +1,13 @@
 const axios = require("axios");
 const config = require("../config");
 
+const TOOSII_BASE = "https://toosiitechdevelopertools.zone.id/api/v1";
+const TOOSII_TOKEN = process.env.TOOSII_API_KEY || config.toosiiKey;
+
 module.exports = {
     name: 'play',
     category: 'downloader',
-    aliases: ['song', 'mp3'],
+    aliases: ['song', 'mp3', 'audio'],
     description: 'Download a song using Toosii Tech API',
     async execute(conn, msg, args, ctx) {
         const { from, reply } = ctx;
@@ -14,36 +17,47 @@ module.exports = {
             return reply("❌ Please provide a song name.\nExample: `.play yatapita`");
         }
 
-        const loadingMsg = await conn.sendMessage(from, { text: `🔍 Searching Toosii for "${query}"...` }, { quoted: msg });
+        const loadingMsg = await conn.sendMessage(from, { text: `🔍 Searching for "${query}"...` }, { quoted: msg });
 
         try {
-            // We are using the exact Toosii base URL from your email.
-            // If the endpoint is '/play' or '/download', we will try it here.
-            const TOOSII_URL = 'https://toosiitechdevelopertools.zone.id/api/v1/play'; 
-
-            const response = await axios.get(TOOSII_URL, {
-                params: {
-                    query: query,
-                    q: query // sending both just in case their API expects 'q'
-                },
-                headers: {
-                    'Authorization': `Bearer ${process.env.TOOSII_API_KEY}`,
-                    'x-api-key': process.env.TOOSII_API_KEY
+            // 1. Search YouTube using your granted /search/youtube scope
+            const searchRes = await axios.get(`${TOOSII_BASE}/search/youtube`, {
+                params: { q: query },
+                headers: { 
+                    'Authorization': `Bearer ${TOOSII_TOKEN}`,
+                    'x-api-key': TOOSII_TOKEN
                 }
             });
 
-            const data = response.data;
+            // Adjust this based on exactly how their search results are formatted
+            const results = searchRes.data.results || searchRes.data.data || [];
+            const video = results[0];
 
-            // Check if the API returned a valid audio link
-            const audioUrl = data.url || data.link || data.download || data.data?.url;
-            const title = data.title || data.data?.title || query;
-
-            if (!audioUrl) {
-                console.log("Toosii Response:", data); // Log this so you can see what it actually returned
-                throw new Error("API responded, but no audio link was found. Check logs.");
+            if (!video) {
+                throw new Error("No results found on YouTube.");
             }
 
-            // Send the audio file
+            const videoUrl = video.url || video.link || `https://youtube.com/watch?v=${video.videoId}`;
+            const title = video.title || query;
+
+            await conn.sendMessage(from, { text: `🎵 Found: *${title}*\n⏳ Downloading audio...`, edit: loadingMsg.key });
+
+            // 2. Download Audio using your granted /download/audio scope
+            const downloadRes = await axios.get(`${TOOSII_BASE}/download/audio`, {
+                params: { url: videoUrl }, // Most APIs require the full YouTube URL here
+                headers: { 
+                    'Authorization': `Bearer ${TOOSII_TOKEN}`,
+                    'x-api-key': TOOSII_TOKEN
+                }
+            });
+
+            const audioUrl = downloadRes.data.url || downloadRes.data.link || downloadRes.data.download;
+            
+            if (!audioUrl) {
+                throw new Error("Could not extract audio link from the download API.");
+            }
+
+            // 3. Send the audio to WhatsApp
             await conn.sendMessage(from, {
                 audio: { url: audioUrl },
                 mimetype: 'audio/mp4',
@@ -51,33 +65,11 @@ module.exports = {
                 caption: `🎵 *${title}*`
             }, { quoted: msg });
 
-            // Delete the loading message
+            // Clean up the loading message
             await conn.sendMessage(from, { delete: loadingMsg.key });
 
         } catch (e) {
             console.error("Toosii Play error:", e.message);
-            
-            // If 'play' fails, try the '/download' endpoint as a fallback
-            try {
-                const fallbackRes = await axios.get('https://toosiitechdevelopertools.zone.id/api/v1/download', {
-                    params: { url: query },
-                    headers: { 'Authorization': `Bearer ${process.env.TOOSII_API_KEY}` }
-                });
-                
-                const fallbackUrl = fallbackRes.data.url || fallbackRes.data.link;
-                if (fallbackUrl) {
-                    await conn.sendMessage(from, {
-                        audio: { url: fallbackUrl },
-                        mimetype: 'audio/mp4',
-                        fileName: `audio.mp3`
-                    }, { quoted: msg });
-                    await conn.sendMessage(from, { delete: loadingMsg.key });
-                    return;
-                }
-            } catch (err) {
-                // Both failed
-            }
-
             await conn.sendMessage(from, { 
                 text: `❌ Error: ${e.message}`, 
                 edit: loadingMsg.key 
