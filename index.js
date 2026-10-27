@@ -5,22 +5,19 @@ require("dotenv").config();
 // ============================================
 const _origConsoleError = console.error.bind(console);
 const _origConsoleWarn  = console.warn.bind(console);
-
 const _SILENCED_PATTERNS = [
     'Bad MAC', 'Bad RSA', 'doDecryptWhisperMessage', 'decryptWithSessions',
     'verifyMAC', 'Session error:Error: Bad MAC',
     'Failed to decrypt message with any known session',
     'unpadRandomMax16', 'Closing session',
     'Closing open session in favor of incoming preKey bundle',
-    'Session already closed', 'Removing old closed session'
+    'Session already closed', 'Removing old closed session', 'MessageCounterError'
 ];
-
 function _shouldSilence(args) {
     const first = args[0];
     if (typeof first !== 'string') return false;
     return _SILENCED_PATTERNS.some(p => first.includes(p));
 }
-
 console.error = (...args) => { if (!_shouldSilence(args)) _origConsoleError(...args); };
 console.warn  = (...args) => { if (!_shouldSilence(args)) _origConsoleWarn(...args); };
 
@@ -36,73 +33,50 @@ const { useMongoDBAuthState } = require("./lib/mongoAuthState");
 const pino = require("pino");
 const express = require("express");
 const mongoose = require("mongoose");
-const path = require("path");
-const fs = require("fs");
 const config = require("./config");
 const { fancy } = require("./lib/font");
+const cors = require("cors"); // Ensure you have run: npm install cors
 
 const app = express();
 const PORT = config.port;
 
-// Middleware
+// ============================================
+//   Middleware (API Only)
+// ============================================
+app.use(cors({ origin: "*" })); // Allows your separate frontend (Render/Vercel) to connect
 app.use(require("helmet")({ contentSecurityPolicy: false }));
 app.use(require("compression")());
 app.use("/api/pair", require("express-rate-limit")({ windowMs: 60_000, max: 15, skipSuccessfulRequests: true }));
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
 
-// DB
+// ============================================
+//   Database & Global State
+// ============================================
 if (config.mongodb) {
     mongoose.connect(config.mongodb, { dbName: "xmd303" })
         .then(() => console.log(fancy("✅ Database connected.")))
         .catch(err => console.error("DB Error:", err.message));
 }
 
-// Global state
 global.sessions = new Map();
 global.mongoClient = null;
 global.__waVersionCache = null;
 global.__bootLocks = new Map();
 global.__pairCooldown = new Map();
 
-const MAX_SESSIONS = 15;
+const MAX_SESSIONS = 50; // High limit for multi-user deployment
 const PAIR_COOLDOWN_MS = 15_000;
 const PAIR_CODE_TIMEOUT_MS = 20_000;
 const SOCKET_READY_TIMEOUT_MS = 45_000;
 
-// Helpers
-function servePage(res, filename) {
-    const p = path.join(__dirname, "public", filename);
-    if (!fs.existsSync(p)) return res.status(404).send(`${filename} missing`);
-    res.sendFile(p);
-}
-function escapeRegex(s) {
-    return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-async function getCachedWaVersion() {
-    if (global.__waVersionCache) return global.__waVersionCache;
-    try {
-        if (typeof fetchLatestWaWebVersion === "function") {
-            const v = await fetchLatestWaWebVersion();
-            if (v?.version) { global.__waVersionCache = v; return v; }
-        }
-    } catch {}
-    return { version: [2, 3000, 1035194821] };
-}
+// ============================================
+//   Helpers
+// ============================================
+function escapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+async function getCachedWaVersion() { return { version: [2, 3000, 1042466098] }; } // Stable hardcoded version
 
 let pairingQueue = Promise.resolve();
-function enqueuePairing(fn) {
-    const next = pairingQueue.then(fn, fn);
-    pairingQueue = next.catch(() => {});
-    return next;
-}
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [k, t] of global.__pairCooldown) {
-        if (now - t > PAIR_COOLDOWN_MS * 4) global.__pairCooldown.delete(k);
-    }
-}, 60_000).unref?.();
+function enqueuePairing(fn) { const next = pairingQueue.then(fn, fn); pairingQueue = next.catch(() => {}); return next; }
 
 async function initMongo() {
     if (!config.mongodb) throw new Error("MONGODB_URI missing");
@@ -112,12 +86,12 @@ async function initMongo() {
     }
 }
 
-// Socket boot
+// ============================================
+//   Boot Socket
+// ============================================
 function bootSocket(sessionId, session) {
     if (global.__bootLocks.has(sessionId)) return global.__bootLocks.get(sessionId);
-    const p = _bootSocketImpl(sessionId, session).finally(() => {
-        global.__bootLocks.delete(sessionId);
-    });
+    const p = _bootSocketImpl(sessionId, session).finally(() => { global.__bootLocks.delete(sessionId); });
     global.__bootLocks.set(sessionId, p);
     return p;
 }
@@ -138,9 +112,7 @@ async function _bootSocketImpl(sessionId, session) {
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000,
-        generateHighQualityLinkPreview: false, 
-        emitOwnEvents: false
+        keepAliveIntervalMs: 30000
     });
 
     session.conn = conn;
@@ -151,7 +123,6 @@ async function _bootSocketImpl(sessionId, session) {
 
     conn.ev.on("connection.update", async (update) => {
         const { connection, lastDisconnect, qr } = update;
-
         if (qr) { session.pairingReady = true; session.socketReady = true; }
         if (connection === "connecting") session.socketReady = true;
 
@@ -165,16 +136,19 @@ async function _bootSocketImpl(sessionId, session) {
                 await collection.updateOne({ _id: `${sessionId}:meta` }, { $set: { value: { jid: conn.user?.id, linkedAt: Date.now() } } }, { upsert: true });
             } catch {}
 
-            if (!session.welcomed && config.ownerNumber) {
-                session.welcomed = true;
+            // ==========================================
+            // FORCED STARTUP WELCOME MESSAGE (Sends on every restart)
+            // ==========================================
+            if (config.ownerNumber) {
                 try {
                     const cleanOwner = String(config.ownerNumber).replace(/\D/g, "");
-                    const ownerJid = cleanOwner + "@s.whatsapp.net";
-                    await conn.sendMessage(ownerJid, {
-                        text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ New session linked!\nSession: ${sessionId}\nOwner: ${config.ownerName}\n\n${fancy(config.footer)}`
+                    await conn.sendMessage(cleanOwner + "@s.whatsapp.net", {
+                        text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ Bot is online!\nSession: ${sessionId}\nStatus: Connected\n\n${fancy(config.footer)}`
                     });
-                    console.log(fancy(`📩 Welcome message sent to ${cleanOwner}`));
-                } catch (e) { console.error("Welcome msg failed:", e.message); }
+                    console.log(fancy(`📩 Startup message sent to owner`));
+                } catch (e) {
+                    console.error("Failed to send startup message:", e.message);
+                }
             }
         }
 
@@ -182,10 +156,12 @@ async function _bootSocketImpl(sessionId, session) {
             session.socketReady = false;
             session.pairingReady = false;
             const code = lastDisconnect?.error?.output?.statusCode;
-            const errorMsg = lastDisconnect?.error?.message || "";
-            console.log(fancy(`❌ [${sessionId}] closed (${code})`));
 
+            // ==========================================
+            // ORIGINAL 401 LOGOUT FIX
+            // ==========================================
             if (code === 401 || code === DisconnectReason.loggedOut) {
+                console.log(fancy(`🚪 [${sessionId}] Logged out (401). Purging session.`));
                 await logoutSession(sessionId);
                 return;
             }
@@ -197,7 +173,7 @@ async function _bootSocketImpl(sessionId, session) {
 
             global.__bootLocks.delete(sessionId);
             
-            const isRestart = code === 515 || code === 428 || errorMsg.includes("Stream Errored");
+            const isRestart = code === 515 || code === 428;
             const delay = isRestart ? 1000 : 10000;
 
             setTimeout(() => {
@@ -209,27 +185,16 @@ async function _bootSocketImpl(sessionId, session) {
     });
 
     const presenter = require("./presenter");
-
-    // BULLETPROOF MESSAGE LISTENER
-    conn.ev.on("messages.upsert", async (m) => {
-        try {
-            await presenter(conn, m, sessionId);
-        } catch (err) {
-            // Errors caught here to prevent socket crash
-        }
-    });
-
-    conn.ev.on("group-participants.update", async (u) => {
-        try { await presenter.handleGroupUpdate(conn, u); } catch (e) {}
-    });
-    conn.ev.on("call", async (calls) => {
-        try { await presenter.handleCallEvent(conn, calls); } catch (e) {}
-    });
+    conn.ev.on("messages.upsert", async (m) => { try { await presenter(conn, m, sessionId); } catch (e) {} });
+    conn.ev.on("group-participants.update", async (u) => { try { await presenter.handleGroupUpdate(conn, u); } catch (e) {} });
+    conn.ev.on("call", async (calls) => { try { await presenter.handleCallEvent(conn, calls); } catch (e) {} });
 
     return conn;
 }
 
-// Pairing
+// ============================================
+//   Pairing Functions
+// ============================================
 async function requestPairingCodeForSession(sessionId, phoneNumber) {
     return enqueuePairing(async () => {
         await initMongo();
@@ -239,24 +204,21 @@ async function requestPairingCodeForSession(sessionId, phoneNumber) {
         if (session?.pairing && session.pairingNumber === phoneNumber) return session.pairing;
 
         if (!session) {
-            if (global.sessions.size >= MAX_SESSIONS) throw new Error(`Server at capacity (${MAX_SESSIONS})`);
+            if (global.sessions.size >= MAX_SESSIONS) throw new Error(`Server at capacity`);
             session = { conn: null, socketReady: false, pairing: null, pairingNumber: null, startedAt: Date.now(), pairingReady: false, socketFailed: false };
             global.sessions.set(sessionId, session);
         }
 
         if (!session.conn) {
-            try { await bootSocket(sessionId, session); }
-            catch (e) {
-                global.sessions.delete(sessionId);
-                throw new Error(`Socket boot failed: ${e.message}`);
-            }
+            try { await bootSocket(sessionId, session); } catch (e) { global.sessions.delete(sessionId); throw new Error(`Boot failed: ${e.message}`); }
         }
 
         const deadline = Date.now() + SOCKET_READY_TIMEOUT_MS;
-        while (!session.pairingReady && Date.now() < deadline) {
+        while (!session.pairingReady && Date.now() < deadline) { 
             if (session.socketFailed) throw new Error("Socket failed");
-            await new Promise(r => setTimeout(r, 250));
+            await new Promise(r => setTimeout(r, 250)); 
         }
+
         if (!session.pairingReady && !session.socketReady) throw new Error("Socket not ready. Please try again.");
 
         let code;
@@ -274,7 +236,7 @@ async function requestPairingCodeForSession(sessionId, phoneNumber) {
         }
 
         const formatted = code.match(/.{1,4}/g)?.join("-") || code;
-        session.pairing = formatted;
+        session.pairing = formatted; 
         session.pairingNumber = phoneNumber;
         console.log(fancy(`✅ [${sessionId}] pairing code: ${formatted}`));
         return formatted;
@@ -292,10 +254,10 @@ async function logoutSession(sessionId) {
         const c = global.mongoClient.db("xmd303").collection("authState");
         const safe = escapeRegex(sessionId);
         await c.deleteMany({ _id: { $regex: `^${safe}:` } });
+        console.log(fancy(`🧹 [${sessionId}] credentials purged from DB`));
     } catch (e) { console.error(`logout ${sessionId}:`, e.message); }
 }
 
-// RESTORE SESSIONS ON BOOT
 async function resumeAllSessions() {
     if (!config.mongodb) return;
     try {
@@ -324,11 +286,9 @@ async function resumeAllSessions() {
     } catch (e) { console.error("Restore error:", e.message); }
 }
 
-// Routes
-app.get("/", (req, res) => servePage(res, "pair.html"));
-app.get("/pair", (req, res) => servePage(res, "pair.html"));
-app.get("/status", (req, res) => servePage(res, "pair.html"));
-
+// ============================================
+//   API ROUTES (For Frontend Web Panel)
+// ============================================
 app.post("/api/pair", async (req, res) => {
     const sessionId = String(req.body?.sessionId || "").trim();
     const num = String(req.body?.num || "").replace(/\D/g, "");
@@ -380,11 +340,16 @@ app.post("/api/unpair", async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Boot
+// Health check route for the bot API
+app.get("/", (req, res) => res.json({ status: "Bot API is running perfectly." }));
+
+// ============================================
+//   Boot
+// ============================================
 (async () => {
-    console.log(fancy(`🚀 Starting ${config.botName} v${config.version}...`));
+    console.log(fancy(`🚀 Starting Bot API...`));
     app.listen(PORT, () => {
-        console.log(fancy(`🌐 Dashboard: http://localhost:${PORT}`));
+        console.log(fancy(`🌐 Bot API listening on port ${PORT}`));
     });
     resumeAllSessions().catch(e => console.error("resumeAllSessions:", e.message));
 })();
