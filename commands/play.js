@@ -5,111 +5,83 @@ module.exports = {
     name: 'play',
     category: 'downloader',
     aliases: ['song', 'mp3'],
-    description: 'Download a song from YouTube as MP3',
+    description: 'Download a song using Toosii Tech API',
     async execute(conn, msg, args, ctx) {
         const { from, reply } = ctx;
         const query = args.join(" ");
 
         if (!query) {
-            return reply("❌ Please provide a song name.\nExample: `.play Faded Alan Walker`");
+            return reply("❌ Please provide a song name.\nExample: `.play yatapita`");
         }
 
-        // 1. Send a loading message
-        const loadingMsg = await conn.sendMessage(from, { text: `🔍 Searching for "${query}"...` }, { quoted: msg });
+        const loadingMsg = await conn.sendMessage(from, { text: `🔍 Searching Toosii for "${query}"...` }, { quoted: msg });
 
         try {
-            // 2. Search YouTube using your SEARCH_API_HOST from .env
-            const searchOptions = {
-                method: 'GET',
-                url: `https://${config.searchApiHost}/search`,
-                params: { q: query, part: 'id,snippet', maxResults: '1', type: 'video' },
+            // We are using the exact Toosii base URL from your email.
+            // If the endpoint is '/play' or '/download', we will try it here.
+            const TOOSII_URL = 'https://toosiitechdevelopertools.zone.id/api/v1/play'; 
+
+            const response = await axios.get(TOOSII_URL, {
+                params: {
+                    query: query,
+                    q: query // sending both just in case their API expects 'q'
+                },
                 headers: {
-                    'X-RapidAPI-Key': config.rapidApiKey,
-                    'X-RapidAPI-Host': config.searchApiHost
+                    'Authorization': `Bearer ${process.env.TOOSII_API_KEY}`,
+                    'x-api-key': process.env.TOOSII_API_KEY
                 }
-            };
+            });
 
-            const searchRes = await axios.request(searchOptions);
-            const video = searchRes.data.items?.[0];
+            const data = response.data;
 
-            if (!video) {
-                await conn.sendMessage(from, { text: "❌ No results found on YouTube.", edit: loadingMsg.key });
-                return;
+            // Check if the API returned a valid audio link
+            const audioUrl = data.url || data.link || data.download || data.data?.url;
+            const title = data.title || data.data?.title || query;
+
+            if (!audioUrl) {
+                console.log("Toosii Response:", data); // Log this so you can see what it actually returned
+                throw new Error("API responded, but no audio link was found. Check logs.");
             }
 
-            const videoId = video.id.videoId;
-            const title = video.snippet.title;
+            // Send the audio file
+            await conn.sendMessage(from, {
+                audio: { url: audioUrl },
+                mimetype: 'audio/mp4',
+                fileName: `${title}.mp3`,
+                caption: `🎵 *${title}*`
+            }, { quoted: msg });
 
-            // 3. Update message: Converting
-            await conn.sendMessage(from, { text: `🎵 Found: *${title}*\n⏳ Converting to MP3...`, edit: loadingMsg.key });
-
-            // 4. Convert using YouTube MP3 (RapidAPI) from .env
-            const mp3Options = {
-                method: 'GET',
-                url: `https://${config.rapidApiHost}/dl`,
-                params: { id: videoId },
-                headers: {
-                    'X-RapidAPI-Key': config.rapidApiKey,
-                    'X-RapidAPI-Host': config.rapidApiHost
-                }
-            };
-
-            const mp3Res = await axios.request(mp3Options);
-            const data = mp3Res.data;
-
-            // Handle "processing" status (API needs time to convert)
-            if (data.status === 'processing') {
-                await conn.sendMessage(from, { text: `⏳ Still processing... this may take a moment.`, edit: loadingMsg.key });
-                // Wait 3 seconds and retry
-                await new Promise(r => setTimeout(r, 3000));
-                const retryRes = await axios.request(mp3Options);
-                if (retryRes.data.status === 'ok') {
-                    return sendAudio(conn, from, msg, retryRes.data, loadingMsg.key);
-                } else {
-                    throw new Error("Conversion timed out. Try again.");
-                }
-            }
-
-            if (data.status === 'ok') {
-                return sendAudio(conn, from, msg, data, loadingMsg.key);
-            } else {
-                throw new Error(data.msg || "Conversion failed");
-            }
+            // Delete the loading message
+            await conn.sendMessage(from, { delete: loadingMsg.key });
 
         } catch (e) {
-            console.error("Play error:", e.message);
-            await conn.sendMessage(from, { text: `❌ Error: ${e.message}`, edit: loadingMsg.key });
+            console.error("Toosii Play error:", e.message);
+            
+            // If 'play' fails, try the '/download' endpoint as a fallback
+            try {
+                const fallbackRes = await axios.get('https://toosiitechdevelopertools.zone.id/api/v1/download', {
+                    params: { url: query },
+                    headers: { 'Authorization': `Bearer ${process.env.TOOSII_API_KEY}` }
+                });
+                
+                const fallbackUrl = fallbackRes.data.url || fallbackRes.data.link;
+                if (fallbackUrl) {
+                    await conn.sendMessage(from, {
+                        audio: { url: fallbackUrl },
+                        mimetype: 'audio/mp4',
+                        fileName: `audio.mp3`
+                    }, { quoted: msg });
+                    await conn.sendMessage(from, { delete: loadingMsg.key });
+                    return;
+                }
+            } catch (err) {
+                // Both failed
+            }
+
+            await conn.sendMessage(from, { 
+                text: `❌ Error: ${e.message}`, 
+                edit: loadingMsg.key 
+            });
         }
     }
 };
-
-// Helper function to send the audio file
-async function sendAudio(conn, from, msg, data, loadingKey) {
-    const { link, title, filesize } = data;
-    
-    // Check file size (WhatsApp limit is usually 16MB for audio)
-    if (filesize && filesize > 16 * 1024 * 1024) {
-        return conn.sendMessage(from, { 
-            text: `⚠️ File is too large (${(filesize / 1024 / 1024).toFixed(2)} MB). WhatsApp limit is 16MB.`, 
-            edit: loadingKey 
-        });
-    }
-
-    try {
-        // Download the audio buffer
-        const audioRes = await axios.get(link, { responseType: 'arraybuffer' });
-        
-        await conn.sendMessage(from, {
-            audio: Buffer.from(audioRes.data),
-            mimetype: 'audio/mp4',
-            fileName: `${title}.mp3`,
-            caption: `🎵 *${title}*`
-        }, { quoted: msg });
-
-        // Delete the "Converting..." message to keep chat clean
-        await conn.sendMessage(from, { delete: loadingKey });
-    } catch (e) {
-        console.error("Send audio error:", e.message);
-        await conn.sendMessage(from, { text: `❌ Failed to send audio: ${e.message}`, edit: loadingKey });
-    }
-}
