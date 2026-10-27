@@ -1,7 +1,7 @@
 const axios = require("axios");
 
-// HARDCODED CREDENTIALS
-const RAPIDAPI_KEY = "eae3a83c15msh69a6323638e111fp1cfb10jsna8bbd4863ac0";
+// HARDCODED CREDENTIALS FROM YOUR SCREENSHOTS
+const RAPIDAPI_KEY = "fe611b5e94mshfb84ea13538167dp1af94ejsne0b702f1290d";
 const SEARCH_HOST = "youtube-v31.p.rapidapi.com";
 const MP3_HOST = "youtube-mp36.p.rapidapi.com";
 
@@ -21,7 +21,7 @@ module.exports = {
         const loadingMsg = await conn.sendMessage(from, { text: `🔍 Searching for "${query}"...` }, { quoted: msg });
 
         try {
-            // 1. Search YouTube using youtube-v31
+            // 1. Search YouTube (Using the exact settings from your RapidAPI dashboard)
             const searchRes = await axios.get(`https://${SEARCH_HOST}/search`, {
                 params: { 
                     q: query, 
@@ -45,10 +45,10 @@ module.exports = {
 
             await conn.sendMessage(from, { text: `🎵 Found: *${title}*\n⏳ Converting to MP3...`, edit: loadingMsg.key });
 
-            // 2. Download MP3 using youtube-mp36
+            // 2. Download MP3 (Using the exact host from your screenshot)
             let audioData = null;
             let attempts = 0;
-            const maxAttempts = 5;
+            const maxAttempts = 6; // Wait up to 18 seconds for YouTube to process
 
             while (attempts < maxAttempts) {
                 const mp3Res = await axios.get(`https://${MP3_HOST}/dl`, {
@@ -73,7 +73,6 @@ module.exports = {
                     break;
                 }
 
-                // If it fails for another reason
                 throw new Error(audioData.msg || "Conversion failed on API side.");
             }
 
@@ -94,8 +93,15 @@ module.exports = {
 
         } catch (e) {
             console.error("Play Error:", e.message);
+            
+            // Show the exact error in WhatsApp (useful if the free tier quota runs out)
+            let errorMsg = e.message;
+            if (e.response?.data?.message) {
+                errorMsg = e.response.data.message;
+            }
+
             await conn.sendMessage(from, { 
-                text: `❌ Error: ${e.message}`, 
+                text: `❌ Error: ${errorMsg}`, 
                 edit: loadingMsg.key 
             });
         }
