@@ -63,7 +63,7 @@ async function getSettings(sessionId) {
         prefix: s?.prefix ?? config.prefix,
         botName: s?.botName ?? config.botName,
         footer: s?.footer ?? config.footer,
-        workMode: s?.workMode ?? config.workMode,
+        workMode: s?.workMode ?? config.workMode, // Uses your .env WORK_MODE
         autoRead: s?.autoRead ?? config.autoRead,
         autoReact: s?.autoReact ?? config.autoReact,
         autoTyping: s?.autoTyping ?? config.autoTyping,
@@ -94,8 +94,6 @@ function getBody(msg) {
 function isOwnerJid(msg) {
     const owners = String(config.ownerNumber || "").split(",").map(n => n.replace(/\D/g, "")).filter(Boolean);
     if (!owners.length) return false;
-    
-    // If the message is fromMe, we still check if the sender ID is the owner's number
     const sender = (msg.key?.participant || msg.key?.remoteJid || "").split("@")[0].split(":")[0].replace(/\D/g, "");
     return owners.includes(sender);
 }
@@ -122,7 +120,7 @@ module.exports = async function presenter(conn, m, sessionId) {
                 const isGroup = from.endsWith("@g.us");
                 const senderIsOwner = isOwnerJid(msg);
 
-                // FIXED: Only ignore bot's own messages if they are NOT the owner
+                // Only ignore the bot's own messages (not the owner's)
                 if (msg.key?.fromMe && !senderIsOwner) continue;
 
                 if (settings.autoRead && !msg.key.fromMe) { try { await conn.readMessages([msg.key]); } catch {} }
@@ -148,12 +146,16 @@ module.exports = async function presenter(conn, m, sessionId) {
                 const mod = commandCache.get(resolved);
                 if (!mod) continue;
 
+                // 1. Check if the command is strictly for the Owner
                 if (mod.ownerOnly && !senderIsOwner) {
-                    await conn.sendMessage(from, { text: "🔒 Owner only." }, { quoted: msg });
+                    await conn.sendMessage(from, { text: "🔒 This command is for the bot owner only." }, { quoted: msg });
                     continue;
                 }
 
-                if (settings.workMode === "private" && !senderIsOwner && mod.allowInPrivate !== true) continue;
+                // 2. Check WORK_MODE. If private, block non-owners. If public, allow everyone.
+                if (settings.workMode === "private" && !senderIsOwner && mod.allowInPrivate !== true) {
+                    continue;
+                }
 
                 if (settings.autoTyping && !msg.key.fromMe) { try { await conn.sendPresenceUpdate("composing", from); } catch {} }
 
