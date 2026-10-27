@@ -1,79 +1,68 @@
 const axios = require("axios");
-const config = require("../config");
-
-const TOOSII_BASE = "https://toosiitechdevelopertools.zone.id/api/v1";
-const TOOSII_TOKEN = process.env.TOOSII_API_KEY || config.toosiiKey;
 
 module.exports = {
     name: 'play',
     category: 'downloader',
     aliases: ['song', 'mp3', 'audio'],
-    description: 'Download a song using Toosii Tech API',
+    description: 'Download a song from YouTube',
     async execute(conn, msg, args, ctx) {
         const { from, reply } = ctx;
         const query = args.join(" ");
+        if (!query) return reply("❌ Provide a song name.");
 
-        if (!query) {
-            return reply("❌ Please provide a song name.\nExample: `.play yatapita`");
-        }
-
-        const loadingMsg = await conn.sendMessage(from, { text: `🔍 Searching for "${query}"...` }, { quoted: msg });
+        const loadingMsg = await conn.sendMessage(from, { text: `🔍 Searching YouTube for "${query}"...` }, { quoted: msg });
 
         try {
-            // 1. Search YouTube using your granted /search/youtube scope
-            const searchRes = await axios.get(`${TOOSII_BASE}/search/youtube`, {
-                params: { q: query },
-                headers: { 
-                    'Authorization': `Bearer ${TOOSII_TOKEN}`,
-                    'x-api-key': TOOSII_TOKEN
-                }
+            // 1. Search YouTube via RapidAPI
+            const searchRes = await axios.get(`https://${process.env.SEARCH_API_HOST}/search`, {
+                params: { q: query, part: 'id,snippet', maxResults: '1', type: 'video' },
+                headers: { 'X-RapidAPI-Key': process.env.RAPIDAPI_KEY, 'X-RapidAPI-Host': process.env.SEARCH_API_HOST }
             });
 
-            // Adjust this based on exactly how their search results are formatted
-            const results = searchRes.data.results || searchRes.data.data || [];
-            const video = results[0];
+            const video = searchRes.data.items?.[0];
+            if (!video) throw new Error("No results found.");
 
-            if (!video) {
-                throw new Error("No results found on YouTube.");
-            }
+            const videoId = video.id.videoId;
+            const title = video.snippet.title;
 
-            const videoUrl = video.url || video.link || `https://youtube.com/watch?v=${video.videoId}`;
-            const title = video.title || query;
+            await conn.sendMessage(from, { text: `🎵 Found: *${title}*\n⏳ Converting...`, edit: loadingMsg.key });
 
-            await conn.sendMessage(from, { text: `🎵 Found: *${title}*\n⏳ Downloading audio...`, edit: loadingMsg.key });
-
-            // 2. Download Audio using your granted /download/audio scope
-            const downloadRes = await axios.get(`${TOOSII_BASE}/download/audio`, {
-                params: { url: videoUrl }, // Most APIs require the full YouTube URL here
-                headers: { 
-                    'Authorization': `Bearer ${TOOSII_TOKEN}`,
-                    'x-api-key': TOOSII_TOKEN
-                }
+            // 2. Download MP3 via RapidAPI
+            const mp3Res = await axios.get(`https://${process.env.RAPIDAPI_HOST}/dl`, {
+                params: { id: videoId },
+                headers: { 'X-RapidAPI-Key': process.env.RAPIDAPI_KEY, 'X-RapidAPI-Host': process.env.RAPIDAPI_HOST }
             });
 
-            const audioUrl = downloadRes.data.url || downloadRes.data.link || downloadRes.data.download;
+            let data = mp3Res.data;
             
-            if (!audioUrl) {
-                throw new Error("Could not extract audio link from the download API.");
+            // Sometimes the API takes a few seconds to process
+            if (data.status === 'processing') {
+                await conn.sendMessage(from, { text: `⏳ Processing audio...`, edit: loadingMsg.key });
+                await new Promise(r => setTimeout(r, 4000));
+                const retryRes = await axios.get(`https://${process.env.RAPIDAPI_HOST}/dl`, {
+                    params: { id: videoId },
+                    headers: { 'X-RapidAPI-Key': process.env.RAPIDAPI_KEY, 'X-RapidAPI-Host': process.env.RAPIDAPI_HOST }
+                });
+                data = retryRes.data;
             }
 
-            // 3. Send the audio to WhatsApp
+            if (data.status !== 'ok' || !data.link) {
+                throw new Error(data.msg || "Conversion failed.");
+            }
+
+            // 3. Send Audio
             await conn.sendMessage(from, {
-                audio: { url: audioUrl },
+                audio: { url: data.link },
                 mimetype: 'audio/mp4',
                 fileName: `${title}.mp3`,
                 caption: `🎵 *${title}*`
             }, { quoted: msg });
 
-            // Clean up the loading message
             await conn.sendMessage(from, { delete: loadingMsg.key });
 
         } catch (e) {
-            console.error("Toosii Play error:", e.message);
-            await conn.sendMessage(from, { 
-                text: `❌ Error: ${e.message}`, 
-                edit: loadingMsg.key 
-            });
+            console.error("Play Error:", e.message);
+            await conn.sendMessage(from, { text: `❌ Error: ${e.message}`, edit: loadingMsg.key });
         }
     }
 };
