@@ -63,7 +63,7 @@ async function initMongo() {
 }
 
 // ============================================
-//   WhatsApp Socket Boot
+//   WhatsApp Socket Boot (For restoring sessions)
 // ============================================
 function bootSocket(sessionId, session) {
     if (global.__bootLocks.has(sessionId)) return global.__bootLocks.get(sessionId);
@@ -89,7 +89,6 @@ async function _bootSocketImpl(sessionId, session) {
     });
 
     session.conn = conn;
-
     conn.ev.on("creds.update", saveCreds);
 
     conn.ev.on("connection.update", async (update) => {
@@ -106,7 +105,7 @@ async function _bootSocketImpl(sessionId, session) {
                 try {
                     const cleanOwner = String(config.ownerNumber).replace(/\D/g, "");
                     await conn.sendMessage(cleanOwner + "@s.whatsapp.net", {
-                        text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ Bot is online!\nSession: ${sessionId}\nStatus: Connected`
+                        text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ Bot is online!\nSession: ${sessionId}`
                     });
                 } catch (e) {}
             }
@@ -117,12 +116,10 @@ async function _bootSocketImpl(sessionId, session) {
 
             // 401 Logout Fix
             if (code === 401 || code === DisconnectReason.loggedOut) {
-                console.log(fancy(`🚪 [${sessionId}] Logged out (401). Purging session.`));
+                console.log(fancy(`🚪 [${sessionId}] Logged out (401). Purging.`));
                 const s = global.sessions.get(sessionId);
                 if (s) { try { s.conn?.ev.removeAllListeners(); s.conn?.ws?.close(); } catch {} global.sessions.delete(sessionId); }
-                try {
-                    await collection.deleteMany({ _id: { $regex: `^${escapeRegex(sessionId)}:` } });
-                } catch {}
+                try { await collection.deleteMany({ _id: { $regex: `^${escapeRegex(sessionId)}:` } }); } catch {}
                 return;
             }
 
@@ -135,9 +132,7 @@ async function _bootSocketImpl(sessionId, session) {
 
     const presenter = require("./presenter");
     conn.ev.on("messages.upsert", async (m) => { try { await presenter(conn, m, sessionId); } catch (e) {} });
-    conn.ev.on("group-participants.update", async (u) => { try { await presenter.handleGroupUpdate(conn, u); } catch (e) {} });
-    conn.ev.on("call", async (calls) => { try { await presenter.handleCallEvent(conn, calls); } catch (e) {} });
-
+    
     return conn;
 }
 
@@ -163,13 +158,12 @@ async function resumeAllSessions() {
 }
 
 // ============================================
-//   Express API Server (Fixes 503 Error)
+//   Express API Server (Fixes 503 & 428 Errors)
 // ============================================
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// The endpoint Repo 2 calls
 app.post("/api/pair", async (req, res) => {
     const { sessionId, num } = req.body;
     
@@ -180,26 +174,36 @@ app.post("/api/pair", async (req, res) => {
         const collection = global.mongoClient.db("xmd303").collection("authState");
         const { state, saveCreds } = await useMongoDBAuthState(collection, sessionId);
 
+        // Create the socket with extended timeouts
         const conn = makeWASocket({
             version: [2, 3000, 1042466098],
             auth: { creds: state.creds, keys: state.keys },
             logger: pino({ level: "silent" }),
             browser: Browsers.ubuntu("Chrome"),
-            printQRInTerminal: false
+            printQRInTerminal: false,
+            defaultQueryTimeoutMs: 60000,
+            connectTimeoutMs: 60000
         });
 
-        // Wait for socket to be ready
-        await new Promise((resolve) => {
+        // FIX FOR 428: Wait strictly for the 'qr' event before requesting the code
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error("Socket timeout waiting for QR")), 25000);
             conn.ev.on("connection.update", (update) => {
-                if (update.qr || update.connection === "connecting") resolve();
+                if (update.qr) {
+                    clearTimeout(timeout);
+                    resolve();
+                }
             });
         });
 
+        // Now it is safe to request the code
         const code = await conn.requestPairingCode(num);
         await saveCreds();
-        conn.ws.close();
+        
+        // Close the temporary socket
+        try { conn.ws.close(); } catch {}
 
-        // Save to global sessions so the worker picks it up
+        // Save to global sessions so the worker picks it up immediately
         if (!global.sessions.has(sessionId)) {
             const session = { conn: null, socketReady: false };
             global.sessions.set(sessionId, session);
@@ -214,7 +218,6 @@ app.post("/api/pair", async (req, res) => {
     }
 });
 
-// Status endpoint for Repo 2
 app.get("/api/pair/status", (req, res) => {
     const sessionId = String(req.query.sessionId || "").trim();
     const s = global.sessions.get(sessionId);
