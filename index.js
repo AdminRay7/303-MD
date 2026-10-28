@@ -13,9 +13,8 @@ console.warn  = (...args) => { if (!_shouldSilence(args)) _origConsoleWarn(...ar
 const { 
     default: makeWASocket, 
     DisconnectReason, 
-    Browsers, 
     makeCacheableSignalKeyStore,
-    fetchLatestWaWebVersion // FIX: Added to get the live WhatsApp version
+    fetchLatestWaWebVersion 
 } = require("@whiskeysockets/baileys");
 const { MongoClient } = require("mongodb");
 const { useMongoDBAuthState } = require("./lib/mongoAuthState");
@@ -49,13 +48,12 @@ async function initMongo() {
     }
 }
 
-// Helper to get the latest version safely
 async function getWaVersion() {
     try {
         const v = await fetchLatestWaWebVersion();
         if (v?.version) return v.version;
     } catch (e) {}
-    return [2, 3000, 1042466098]; // Fallback if fetch fails
+    return [2, 3000, 1042466098]; 
 }
 
 // ============================================
@@ -80,7 +78,8 @@ async function _bootSocketImpl(sessionId, session) {
         version: version,
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
         logger: pino({ level: "silent" }),
-        browser: Browsers.ubuntu("Chrome"),
+        // Use Ubuntu/Chrome string which is safest for Heroku
+        browser: ["Ubuntu", "Chrome", "20.0.04"], 
         syncFullHistory: false,
         markOnlineOnConnect: false,
         defaultQueryTimeoutMs: 300000,
@@ -112,7 +111,6 @@ async function _bootSocketImpl(sessionId, session) {
 
         if (connection === "close") {
             const code = lastDisconnect?.error?.output?.statusCode;
-
             // 401 Logout Fix
             if (code === 401 || code === DisconnectReason.loggedOut) {
                 console.log(fancy(`🚪 [${sessionId}] Logged out (401). Purging.`));
@@ -157,7 +155,7 @@ async function resumeAllSessions() {
 }
 
 // ============================================
-//   Express API Server (Fixes 503 & 428 Errors)
+//   Express API Server
 // ============================================
 const app = express();
 app.use(cors({ origin: "*" }));
@@ -173,23 +171,22 @@ app.post("/api/pair", async (req, res) => {
         const collection = global.mongoClient.db("xmd303").collection("authState");
         const { state, saveCreds } = await useMongoDBAuthState(collection, sessionId);
         
-        // FIX: Fetch the real current WhatsApp version
         const version = await getWaVersion();
 
         const conn = makeWASocket({
             version: version,
             auth: { creds: state.creds, keys: state.keys },
             logger: pino({ level: "silent" }),
-            browser: Browsers.ubuntu("Chrome"),
+            browser: ["Ubuntu", "Chrome", "20.0.04"],
             printQRInTerminal: false,
-            defaultQueryTimeoutMs: 300000,
-            connectTimeoutMs: 300000,
-            keepAliveIntervalMs: 30000
+            // 60 seconds is enough. If it takes longer, WhatsApp will reject the code anyway.
+            defaultQueryTimeoutMs: 60000,
+            connectTimeoutMs: 60000
         });
 
         // Wait strictly for the 'qr' event before requesting the code
         await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error("Socket timeout waiting for QR")), 25000);
+            const timeout = setTimeout(() => reject(new Error("Socket timeout waiting for QR")), 20000);
             conn.ev.on("connection.update", (update) => {
                 if (update.qr) {
                     clearTimeout(timeout);
@@ -198,20 +195,17 @@ app.post("/api/pair", async (req, res) => {
             });
         });
 
-        // Request the code
         const code = await conn.requestPairingCode(num);
         await saveCreds();
         
-        // Save to global sessions so the worker picks it up immediately
+        // Add to global sessions and attach connection listeners
         if (!global.sessions.has(sessionId)) {
             const session = { conn: conn, socketReady: true }; 
             global.sessions.set(sessionId, session);
             
-            // Re-bind the connection updates to the main worker
             conn.ev.on("connection.update", async (update) => {
                 if (update.connection === "open") {
                     console.log(fancy(`✅ [${sessionId}] connected successfully after pairing`));
-                    const collection = global.mongoClient.db("xmd303").collection("authState");
                     try {
                         await collection.updateOne({ _id: `${sessionId}:meta` }, { $set: { value: { jid: conn.user?.id, linkedAt: Date.now() } } }, { upsert: true });
                     } catch {}
