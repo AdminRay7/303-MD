@@ -10,7 +10,13 @@ function _shouldSilence(args) { const first = args[0]; return typeof first === '
 console.error = (...args) => { if (!_shouldSilence(args)) _origConsoleError(...args); };
 console.warn  = (...args) => { if (!_shouldSilence(args)) _origConsoleWarn(...args); };
 
-const { default: makeWASocket, DisconnectReason, Browsers, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys");
+const { 
+    default: makeWASocket, 
+    DisconnectReason, 
+    Browsers, 
+    makeCacheableSignalKeyStore,
+    fetchLatestWaWebVersion // FIX: Added to get the live WhatsApp version
+} = require("@whiskeysockets/baileys");
 const { MongoClient } = require("mongodb");
 const { useMongoDBAuthState } = require("./lib/mongoAuthState");
 const pino = require("pino");
@@ -43,6 +49,15 @@ async function initMongo() {
     }
 }
 
+// Helper to get the latest version safely
+async function getWaVersion() {
+    try {
+        const v = await fetchLatestWaWebVersion();
+        if (v?.version) return v.version;
+    } catch (e) {}
+    return [2, 3000, 1042466098]; // Fallback if fetch fails
+}
+
 // ============================================
 //   WhatsApp Socket Boot (For restoring sessions)
 // ============================================
@@ -59,9 +74,10 @@ async function _bootSocketImpl(sessionId, session) {
 
     const collection = global.mongoClient.db("xmd303").collection("authState");
     const { state, saveCreds } = await useMongoDBAuthState(collection, sessionId);
+    const version = await getWaVersion();
 
     const conn = makeWASocket({
-        version: [2, 3000, 1042466098],
+        version: version,
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
         logger: pino({ level: "silent" }),
         browser: Browsers.ubuntu("Chrome"),
@@ -156,10 +172,12 @@ app.post("/api/pair", async (req, res) => {
         await initMongo();
         const collection = global.mongoClient.db("xmd303").collection("authState");
         const { state, saveCreds } = await useMongoDBAuthState(collection, sessionId);
+        
+        // FIX: Fetch the real current WhatsApp version
+        const version = await getWaVersion();
 
-        // Create the socket with extended 5-minute timeouts so it doesn't close while typing
         const conn = makeWASocket({
-            version: [2, 3000, 1042466098],
+            version: version,
             auth: { creds: state.creds, keys: state.keys },
             logger: pino({ level: "silent" }),
             browser: Browsers.ubuntu("Chrome"),
@@ -180,16 +198,13 @@ app.post("/api/pair", async (req, res) => {
             });
         });
 
-        // Now it is safe to request the code
+        // Request the code
         const code = await conn.requestPairingCode(num);
         await saveCreds();
         
-        // Do NOT close the socket immediately here. 
-        // We leave it open so WhatsApp can verify the code when you type it on your phone.
-        
         // Save to global sessions so the worker picks it up immediately
         if (!global.sessions.has(sessionId)) {
-            const session = { conn: conn, socketReady: true }; // Attach the socket directly!
+            const session = { conn: conn, socketReady: true }; 
             global.sessions.set(sessionId, session);
             
             // Re-bind the connection updates to the main worker
