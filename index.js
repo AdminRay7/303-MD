@@ -30,6 +30,8 @@ const {
 const { MongoClient } = require("mongodb");
 const { useMongoDBAuthState } = require("./lib/mongoAuthState");
 const pino = require("pino");
+const express = require("express");
+const cors = require("cors");
 const mongoose = require("mongoose");
 const config = require("./config");
 const { fancy } = require("./lib/font");
@@ -51,6 +53,7 @@ global.__bootLocks = new Map();
 //   Helpers
 // ============================================
 function escapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
 async function initMongo() {
     if (!config.mongodb) throw new Error("MONGODB_URI missing");
     if (!global.mongoClient) {
@@ -60,7 +63,7 @@ async function initMongo() {
 }
 
 // ============================================
-//   Socket Boot
+//   WhatsApp Socket Boot
 // ============================================
 function bootSocket(sessionId, session) {
     if (global.__bootLocks.has(sessionId)) return global.__bootLocks.get(sessionId);
@@ -77,56 +80,42 @@ async function _bootSocketImpl(sessionId, session) {
     const { state, saveCreds } = await useMongoDBAuthState(collection, sessionId);
 
     const conn = makeWASocket({
-        version: [2, 3000, 1042466098], // Stable version
+        version: [2, 3000, 1042466098],
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
         logger: pino({ level: "silent" }),
         browser: Browsers.ubuntu("Chrome"),
         syncFullHistory: false,
-        markOnlineOnConnect: false,
-        connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000
+        markOnlineOnConnect: false
     });
 
     session.conn = conn;
-    session.socketFailed = false;
-    session.pairingReady = false;
 
     conn.ev.on("creds.update", saveCreds);
 
     conn.ev.on("connection.update", async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect } = update;
         
-        if (qr) { session.pairingReady = true; session.socketReady = true; }
-        if (connection === "connecting") session.socketReady = true;
-
         if (connection === "open") {
-            session.socketReady = true;
-            session.pairing = null;
-            session.pairingNumber = null;
             console.log(fancy(`✅ [${sessionId}] connected successfully`));
-
             try {
                 await collection.updateOne({ _id: `${sessionId}:meta` }, { $set: { value: { jid: conn.user?.id, linkedAt: Date.now() } } }, { upsert: true });
             } catch {}
 
-            // Welcome Message on Startup/Restart
+            // Startup Message
             if (config.ownerNumber) {
                 try {
                     const cleanOwner = String(config.ownerNumber).replace(/\D/g, "");
                     await conn.sendMessage(cleanOwner + "@s.whatsapp.net", {
-                        text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ Bot is online!\nSession: ${sessionId}\nStatus: Connected\n\n${fancy(config.footer)}`
+                        text: `╭─── • 🔑 • ───╮\n   ${config.botName} ᴠ${config.version}\n╰─── • 🔑 • ───╯\n\n✅ Bot is online!\nSession: ${sessionId}\nStatus: Connected`
                     });
-                    console.log(fancy(`📩 Startup message sent to owner`));
                 } catch (e) {}
             }
         }
 
         if (connection === "close") {
-            session.socketReady = false;
-            session.pairingReady = false;
             const code = lastDisconnect?.error?.output?.statusCode;
 
-            // ORIGINAL 401 LOGOUT FIX
+            // 401 Logout Fix
             if (code === 401 || code === DisconnectReason.loggedOut) {
                 console.log(fancy(`🚪 [${sessionId}] Logged out (401). Purging session.`));
                 const s = global.sessions.get(sessionId);
@@ -136,25 +125,14 @@ async function _bootSocketImpl(sessionId, session) {
                 } catch {}
                 return;
             }
-            
-            if (session._paused || code === 440) {
-                global.sessions.delete(sessionId);
-                return;
-            }
 
             global.__bootLocks.delete(sessionId);
-            const isRestart = code === 515 || code === 428;
-            const delay = isRestart ? 1000 : 10000;
-
             setTimeout(() => {
-                if (!global.sessions.has(sessionId) || session._paused) return;
-                console.log(fancy(`🔄 Reconnecting [${sessionId}]...`));
-                bootSocket(sessionId, session).catch(() => {});
-            }, delay);
+                if (global.sessions.has(sessionId)) bootSocket(sessionId, session).catch(() => {});
+            }, 5000);
         }
     });
 
-    // Load Presenter (Commands Engine)
     const presenter = require("./presenter");
     conn.ev.on("messages.upsert", async (m) => { try { await presenter(conn, m, sessionId); } catch (e) {} });
     conn.ev.on("group-participants.update", async (u) => { try { await presenter.handleGroupUpdate(conn, u); } catch (e) {} });
@@ -164,40 +142,98 @@ async function _bootSocketImpl(sessionId, session) {
 }
 
 // ============================================
-//   Restore Sessions
+//   Session Restore
 // ============================================
 async function resumeAllSessions() {
     if (!config.mongodb) return;
     try {
         await initMongo();
-        const c = global.mongoClient.db("xmd303").collection("authState");
-        const metas = await c.find({ _id: { $regex: ":meta$" } }).toArray();
+        const metas = await global.mongoClient.db("xmd303").collection("authState").find({ _id: { $regex: ":meta$" } }).toArray();
         console.log(fancy(`🔄 Restoring ${metas.length} session(s)...`));
 
-        const ids = metas.map(m => String(m._id).replace(/:meta$/, "")).filter(id => !global.sessions.has(id));
-
-        for (const sessionId of ids) {
-            const session = { conn: null, socketReady: false, pairing: null, pairingNumber: null, startedAt: Date.now(), welcomed: true, pairingReady: false, socketFailed: false };
-            global.sessions.set(sessionId, session);
-            try {
-                await Promise.race([
-                    bootSocket(sessionId, session),
-                    new Promise((_, rej) => setTimeout(() => rej(new Error("boot timeout")), 75000))
-                ]);
-            } catch (e) {
-                console.error(`Restore ${sessionId}:`, e.message);
-                global.sessions.delete(sessionId);
+        for (const meta of metas) {
+            const sessionId = String(meta._id).replace(/:meta$/, "");
+            if (!global.sessions.has(sessionId)) {
+                const session = { conn: null, socketReady: false };
+                global.sessions.set(sessionId, session);
+                bootSocket(sessionId, session).catch(e => console.error(`Restore ${sessionId}:`, e.message));
             }
-            await new Promise(r => setTimeout(r, 1500));
         }
     } catch (e) { console.error("Restore error:", e.message); }
 }
 
 // ============================================
-//   Start Bot Engine
+//   Express API Server (Fixes 503 Error)
 // ============================================
-(async () => {
-    console.log(fancy(`🚀 Starting Bot Core (Worker)...`));
-    // No app.listen() here! This is a background worker.
+const app = express();
+app.use(cors({ origin: "*" }));
+app.use(express.json());
+
+// The endpoint Repo 2 calls
+app.post("/api/pair", async (req, res) => {
+    const { sessionId, num } = req.body;
+    
+    if (!sessionId || !num) return res.status(400).json({ error: "Missing sessionId or number" });
+
+    try {
+        await initMongo();
+        const collection = global.mongoClient.db("xmd303").collection("authState");
+        const { state, saveCreds } = await useMongoDBAuthState(collection, sessionId);
+
+        const conn = makeWASocket({
+            version: [2, 3000, 1042466098],
+            auth: { creds: state.creds, keys: state.keys },
+            logger: pino({ level: "silent" }),
+            browser: Browsers.ubuntu("Chrome"),
+            printQRInTerminal: false
+        });
+
+        // Wait for socket to be ready
+        await new Promise((resolve) => {
+            conn.ev.on("connection.update", (update) => {
+                if (update.qr || update.connection === "connecting") resolve();
+            });
+        });
+
+        const code = await conn.requestPairingCode(num);
+        await saveCreds();
+        conn.ws.close();
+
+        // Save to global sessions so the worker picks it up
+        if (!global.sessions.has(sessionId)) {
+            const session = { conn: null, socketReady: false };
+            global.sessions.set(sessionId, session);
+            bootSocket(sessionId, session).catch(() => {});
+        }
+
+        res.json({ success: true, code: code.match(/.{1,4}/g)?.join("-") || code });
+
+    } catch (error) {
+        console.error("Pairing Error:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Status endpoint for Repo 2
+app.get("/api/pair/status", (req, res) => {
+    const sessionId = String(req.query.sessionId || "").trim();
+    const s = global.sessions.get(sessionId);
+    if (!s) return res.json({ connected: false, exists: false });
+    
+    res.json({
+        connected: !!s.conn?.user,
+        exists: true,
+        jid: s.conn?.user?.id || null
+    });
+});
+
+app.get("/", (req, res) => res.json({ status: "Bot API is running" }));
+
+// ============================================
+//   Start Everything
+// ============================================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(fancy(`🌐 Bot API listening on port ${PORT}`));
     resumeAllSessions().catch(e => console.error("resumeAllSessions:", e.message));
-})();
+});
